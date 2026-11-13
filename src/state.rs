@@ -4,12 +4,14 @@
 //! app's `_refresh_all`. Views are pure functions of this state.
 
 use std::collections::HashMap;
+use std::path::Path;
 
 use chrono::{Datelike, Local, NaiveDate};
 use rune::TextEdit;
 use rune_kit::shell::PaneState;
 
 use crate::db::{self, Db, TransactionChange};
+use crate::export::{self, Period};
 use crate::model::{self, AnnualSummary, Balance, Categories, Kind, MonthlySummary, Transaction};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -79,6 +81,9 @@ pub enum Dialog {
     Categories {
         error: Option<String>,
     },
+    Export {
+        error: Option<String>,
+    },
     ConfirmDelete {
         id: String,
         label: String,
@@ -109,6 +114,52 @@ pub struct CatsForm {
     pub kind: Kind,
     pub draft: Categories,
     pub new_name: TextEdit,
+}
+
+/// The Excel export dialog's period fields: empty years mean "all years", every month starts
+/// selected.
+pub struct ExportForm {
+    pub from_year: TextEdit,
+    pub to_year: TextEdit,
+    /// One entry per month, January first.
+    pub months: [bool; 12],
+}
+
+impl ExportForm {
+    fn new() -> ExportForm {
+        ExportForm {
+            from_year: TextEdit::new(""),
+            to_year: TextEdit::new(""),
+            months: [true; 12],
+        }
+    }
+
+    pub fn month_selected(&self, month: u32) -> bool {
+        self.months[month.clamp(1, 12) as usize - 1]
+    }
+
+    /// Flips one month, 1-based.
+    pub fn toggle_month(&mut self, month: u32) {
+        let index = month.clamp(1, 12) as usize - 1;
+        self.months[index] = !self.months[index];
+    }
+
+    pub fn all_months(&self) -> bool {
+        self.months.iter().all(|selected| *selected)
+    }
+
+    pub fn no_months(&self) -> bool {
+        self.months.iter().all(|selected| !*selected)
+    }
+
+    /// The "Tutti" checkbox: selects every month unless they all already are.
+    pub fn toggle_all_months(&mut self) {
+        self.months = [!self.all_months(); 12];
+    }
+
+    pub fn selected_months(&self) -> export::MonthSet {
+        export::MonthSet::from_months((1..=12).filter(|month| self.month_selected(*month)))
+    }
 }
 
 impl CatsForm {
@@ -166,6 +217,7 @@ pub struct App {
     pub picker_open: Option<Picker>,
     pub tx_form: TxForm,
     pub cats_form: CatsForm,
+    pub export_form: ExportForm,
     pub notice: Option<String>,
 }
 
@@ -220,6 +272,7 @@ impl App {
             picker_open: None,
             tx_form: TxForm::new(),
             cats_form: CatsForm::new(&Categories::default()),
+            export_form: ExportForm::new(),
             notice: None,
         };
         if let Err(err) = app.db.init() {
@@ -229,7 +282,7 @@ impl App {
         app
     }
 
-    /// `MT_SNAP_DIALOG=add|categories|edit|delete` opens a modal for a headless snapshot.
+    /// `MT_SNAP_DIALOG=add|categories|edit|delete|export` opens a modal for a headless snapshot.
     fn open_snap_dialog(&mut self) {
         let Ok(which) = std::env::var("MT_SNAP_DIALOG") else {
             return;
@@ -237,6 +290,7 @@ impl App {
         match which.as_str() {
             "add" => self.open_add(),
             "categories" => self.open_categories(),
+            "export" => self.open_export(),
             "edit" => {
                 if let Some(t) = self.transactions.first().cloned() {
                     self.open_edit(&t);
@@ -374,7 +428,11 @@ impl App {
 
     /// Opens or closes the header picker's listbox.
     pub fn toggle_picker(&mut self, picker: Picker) {
-        self.picker_open = if self.picker_open == Some(picker) { None } else { Some(picker) };
+        self.picker_open = if self.picker_open == Some(picker) {
+            None
+        } else {
+            Some(picker)
+        };
     }
 
     /// Closes any open header picker (Escape or a press outside the listbox).
@@ -629,6 +687,79 @@ impl App {
             }
             Err(err) => self.set_categories_error(&format!("Could not save: {err}")),
         }
+    }
+
+    // ── Excel export ────────────────────────────────────────────────────────
+
+    /// The default name the save dialog proposes.
+    pub fn default_export_name() -> String {
+        format!("MoneyTracker-{}.xlsx", today_iso_date().format("%Y-%m-%d"))
+    }
+
+    pub fn open_export(&mut self) {
+        self.export_form = ExportForm::new();
+        self.notice = None;
+        self.dialog = Some(Dialog::Export { error: None });
+    }
+
+    pub fn set_export_error(&mut self, message: &str) {
+        if let Some(Dialog::Export { error }) = &mut self.dialog {
+            *error = Some(message.to_owned());
+        }
+    }
+
+    /// Reads the dialog's fields into a [`Period`]; empty years mean "everything".
+    pub fn export_period(&self) -> Result<Period, String> {
+        fn year(text: &str, label: &str) -> Result<Option<i32>, String> {
+            let raw = text.trim();
+            if raw.is_empty() {
+                return Ok(None);
+            }
+            match raw.parse::<i32>() {
+                Ok(value) if (1900..=2200).contains(&value) => Ok(Some(value)),
+                _ => Err(format!("{label}: scrivi un anno tra 1900 e 2200")),
+            }
+        }
+
+        let from_year = year(&self.export_form.from_year.text, "Da anno")?;
+        let to_year = year(&self.export_form.to_year.text, "A anno")?;
+        if let (Some(from), Some(to)) = (from_year, to_year) {
+            if from > to {
+                return Err("Da anno è successivo ad A anno".to_owned());
+            }
+        }
+
+        let months = self.export_form.selected_months();
+        if months.is_empty() {
+            return Err("Mese: seleziona almeno un mese".to_owned());
+        }
+
+        Ok(Period {
+            from_year,
+            to_year,
+            months,
+        })
+    }
+
+    /// Writes the workbook to `path`; returns how many transactions it contains.
+    pub fn export_to(&self, path: &Path, period: &Period) -> Result<usize, String> {
+        let transactions = self
+            .db
+            .load_transactions()
+            .map_err(|err| format!("lettura del database: {err}"))?;
+        let categories = self
+            .db
+            .load_categories()
+            .map_err(|err| format!("lettura delle categorie: {err}"))?;
+        let bytes = export::build_workbook(&transactions, &categories, period)
+            .map_err(|err| format!("creazione del file: {err}"))?;
+        if let Some(dir) = path.parent().filter(|dir| !dir.as_os_str().is_empty()) {
+            std::fs::create_dir_all(dir)
+                .map_err(|err| format!("creazione della cartella {}: {err}", dir.display()))?;
+        }
+        std::fs::write(path, bytes)
+            .map_err(|err| format!("scrittura di {}: {err}", path.display()))?;
+        Ok(transactions.len())
     }
 
     // ── Budgets ─────────────────────────────────────────────────────────────

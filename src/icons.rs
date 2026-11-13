@@ -89,6 +89,11 @@ icon!(
     "mt-search",
     r#"<circle cx="10.5" cy="10.5" r="6.5" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="M15.4 15.4L20 20" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/>"#
 );
+icon!(
+    DOWNLOAD,
+    "mt-download",
+    r#"<path d="M12 4v11M7.5 10.5L12 15l4.5-4.5M5 19h14" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/>"#
+);
 
 // ── Money ───────────────────────────────────────────────────────────────────
 

@@ -21,8 +21,9 @@ A personal-finance desktop app written in Rust with [Rune](https://github.com/an
 - **Calendar** – the month grid with each day's totals and the selected day's records.
 - **Budgets** – one annual limit per expense category, edited inline and saved with Enter or the check.
 - **Year overview** – the twelve months with income, expenses and balance, plus a year total.
+- **Excel export** – one keystroke (<kbd>Ctrl</kbd>+<kbd>E</kbd>) writes an `.xlsx` workbook with six charts, a filterable transactions table and the aggregates behind them; see [Excel export](#excel-export).
 
-Every time-scoped screen has dropdown pickers for **month** and **year** (a single year picker on the annual views) that update the page immediately; the default is always the current month/year, and a *Today* button jumps back to it. The toolbar adds a transaction (<kbd>Ctrl</kbd>+<kbd>N</kbd>) and opens the category manager; <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>B</kbd> shows/hides the sidebar.
+Every time-scoped screen has dropdown pickers for **month** and **year** (a single year picker on the annual views) that update the page immediately; the default is always the current month/year, and a *Today* button jumps back to it. The toolbar adds a transaction (<kbd>Ctrl</kbd>+<kbd>N</kbd>), exports to Excel (<kbd>Ctrl</kbd>+<kbd>E</kbd>) and opens the category manager; <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>B</kbd> shows/hides the sidebar.
 
 ## Requirements
 
@@ -46,6 +47,20 @@ The first build compiles Rune from its pinned git revision (`Cargo.toml`) and ta
 3. for a `cargo run` build (binary under `target/debug|release`), the project's own `data/moneytracker.db`, so development never writes into `target/`.
 
 A missing database is created and seeded on first launch with 22 default categories (14 expense, 8 income).
+
+## Excel export
+
+`Ctrl`+`E` (or the toolbar's **Export Excel**) opens an Italian-language dialog with two optional year fields — `Da anno` and `A anno` — and a grid of monthly checkboxes (`Gennaio` … `Dicembre`) with a `Tutti` checkbox that selects or clears all twelve; the `Tutti` box shows a mixed state when only some months are selected. Then comes the native save dialog, proposing `MoneyTracker-YYYY-MM-DD.xlsx`. Leave the years empty and every month checked to export the whole history. At least one month is required.
+
+The workbook has three sheets:
+
+| Sheet | Contents |
+| --- | --- |
+| `Grafici` | Six charts with Italian titles: monthly and yearly income/expenses/balance columns, expense and income category donuts, and one monthly line chart per direction with a line for every category. |
+| `Transazioni` | A real Excel Table named `Transazioni`: frozen header, autofilter, and a `Totale` row built from `SUBTOTAL(109, …)` so it follows the filters. Columns: `Data, Anno, Mese, Tipo, Categoria, Descrizione, Entrate, Uscite, Saldo, ID, Creato il`; money columns are formatted as euros. |
+| `Dati` | Hidden. The month × category matrices and summary tables the charts point at, written as `SUMIFS` formulas over `Transazioni` with cached results, so the workbook opens already populated and recalculates when the data changes. |
+
+The period narrows the KPIs and the donuts, and line charts leave a gap outside the selected months; the monthly chart follows the year range only, and the yearly chart always shows every year. Dates in the grid stay ISO text (`YYYY-MM-DD`), so the table sorts and filters lexically. An empty database still produces a valid workbook: headers, a *Nessun dato da esportare* note and no half-drawn charts.
 
 ## Building the release exe
 
@@ -87,6 +102,7 @@ Categories carry the emoji in their stored name (`"🍔 Food & Dining"`); a few 
 | --- | --- |
 | `src/db.rs` | A 1:1 port of `data_manager.py`: schema, seed, queries, summaries, budgets. |
 | `src/model.rs` | Domain types, money formatting, category display names (emoji stripped). |
+| `src/export.rs` | Excel workbook: period filters, aggregates, the transactions table, the six charts. |
 | `src/state.rs` | `App`: what the views read and the handlers that change it. |
 | `src/ui/` | The window shell and one module per view, plus `widgets.rs` and `dialogs.rs`. |
 | `src/icons.rs` | The SVG icon set and the category → icon mapping. |
@@ -100,7 +116,7 @@ Views are plain functions of `App`; Rune re-renders them every frame and the ele
 cargo test
 ```
 
-Seven inline unit tests in `src/db.rs` and `src/model.rs`: throwaway-database round trips, fresh-DB seeding, budget lifecycle, money formatting, emoji stripping, legacy-spelling merge and month names. They never touch the live database.
+Fourteen inline unit tests in `src/db.rs`, `src/model.rs` and `src/export.rs`: throwaway-database round trips, fresh-DB seeding, budget lifecycle, money formatting, emoji stripping, legacy-spelling merge, month names, period and month-set filtering (including multi-month `SUMIFS`), and workbook smoke tests (sheets, table totals, chart ranges, empty database). They never touch the live database.
 
 ## Headless snapshots
 
@@ -110,7 +126,7 @@ Rune can render a single frame without a window; the app understands a few envir
 $env:MT_DB_FILE="C:\path\to\db"               # which database to open
 $env:MT_SNAP_MONTH="2026-10"                  # month to open
 $env:MT_SNAP_DAY="2026-10-25"                 # selected calendar day
-$env:MT_SNAP_DIALOG="add|categories|edit|delete"
+$env:MT_SNAP_DIALOG="add|categories|edit|delete|export"
 cargo run -- --snap shot.png --theme dark --size 1180x760 --view dashboard
 ```
 

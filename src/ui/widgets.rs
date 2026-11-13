@@ -436,18 +436,13 @@ pub fn month_picker(s: &App, k: &Kit, layer: &mut Vec<El>) -> El {
         })
         .build(k, layer);
 
-    row()
-        .gap(8.0)
-        .center_y()
-        .child(month)
-        .child(year)
-        .child(
-            Button::new("Today")
-                .variant(ButtonVariant::Ghost)
-                .control_size(ControlSize::Small)
-                .on_press(|s: &mut App| s.go_today())
-                .build(k),
-        )
+    row().gap(8.0).center_y().child(month).child(year).child(
+        Button::new("Today")
+            .variant(ButtonVariant::Ghost)
+            .control_size(ControlSize::Small)
+            .on_press(|s: &mut App| s.go_today())
+            .build(k),
+    )
 }
 
 /// The year picker for the budgets and year overview.

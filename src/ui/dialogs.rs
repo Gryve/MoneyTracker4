@@ -3,12 +3,13 @@
 //! Rune's [`Dialog`] does focus, Escape and background inertness; whether one is open is on
 //! [`App::dialog`]. Everything is built into the kit's overlay layer, above the shell.
 
-use rune::{col, el, icon, row, text, El};
+use rune::{col, el, icon, row, text, El, FileDialogOptions, Tx};
 use rune_kit::{
-    Button, ButtonVariant, ControlSize, Dialog, IconButton, IconButtonVariant, Kit,
+    Button, ButtonVariant, Checkbox, ControlSize, Dialog, IconButton, IconButtonVariant, Kit,
     SegmentedControl, TextInput,
 };
 
+use crate::export;
 use crate::icons;
 use crate::model::{self, Kind};
 use crate::state::{App, Dialog as Modal};
@@ -22,6 +23,7 @@ pub fn mount(s: &App, k: &Kit, layer: &mut Layer) {
             transaction(s, k, layer, edit_id.is_some(), error.as_deref())
         }
         Some(Modal::Categories { error }) => categories(s, k, layer, error.as_deref()),
+        Some(Modal::Export { error }) => export(s, k, layer, error.as_deref()),
         Some(Modal::ConfirmDelete { label, .. }) => confirm(k, layer, label),
     }
 }
@@ -355,6 +357,133 @@ fn categories(s: &App, k: &Kit, layer: &mut Layer, error: Option<&str>) {
 
     Dialog::new("categories-dialog", "Manage categories")
         .description("Categories are stored by name; the icon comes from the name.")
+        .open(true)
+        .width(560.0)
+        .fit()
+        .on_close(|s: &mut App| s.close_dialog())
+        .child(body)
+        .build(k, layer);
+}
+
+fn export(s: &App, k: &Kit, layer: &mut Layer, error: Option<&str>) {
+    let from = TextInput::new(&s.export_form.from_year)
+        .placeholder("es. 2023")
+        .label("Da anno")
+        .leading_icon(&icons::CALENDAR)
+        .on_edit(|s: &mut App| &mut s.export_form.from_year)
+        .width(None)
+        .build(k);
+
+    let to = TextInput::new(&s.export_form.to_year)
+        .placeholder("es. 2026")
+        .label("A anno")
+        .leading_icon(&icons::CALENDAR)
+        .on_edit(|s: &mut App| &mut s.export_form.to_year)
+        .width(None)
+        .build(k);
+
+    let all_months = s.export_form.all_months();
+    let month_grid = {
+        let months: Vec<u32> = (1..=12).collect();
+        let mut grid = col().w_full().gap(8.0);
+        for chunk in months.chunks(4) {
+            let mut line = row().w_full().gap(12.0).items_center();
+            for &month in chunk {
+                line = line.child(
+                    Checkbox::new(s.export_form.month_selected(month))
+                        .label(export::month_name(month))
+                        .on_toggle(move |s: &mut App| s.export_form.toggle_month(month))
+                        .build(k)
+                        .grow(1.0),
+                );
+            }
+            grid = grid.child(line);
+        }
+        grid
+    };
+    let months = col()
+        .w_full()
+        .gap(10.0)
+        .child(
+            Checkbox::new(all_months)
+                .label("Tutti")
+                .indeterminate(!all_months && !s.export_form.no_months())
+                .on_toggle(|s: &mut App| s.export_form.toggle_all_months())
+                .build(k),
+        )
+        .child(month_grid);
+
+    let cancel = Button::new("Annulla")
+        .variant(ButtonVariant::Ghost)
+        .on_press(|s: &mut App| s.close_dialog())
+        .build(k);
+
+    let confirm = Button::new("Esporta")
+        .variant(ButtonVariant::Contrast)
+        .icon(&icons::DOWNLOAD)
+        .on_press_tx(|s: &mut App, tx: &mut Tx| {
+            let period = match s.export_period() {
+                Ok(period) => period,
+                Err(message) => {
+                    s.set_export_error(&message);
+                    return;
+                }
+            };
+            s.dialog = None;
+
+            let options = FileDialogOptions {
+                title: "Esporta in Excel".to_owned(),
+                file_name: Some(App::default_export_name()),
+                ..Default::default()
+            }
+            .filter("Excel", &["xlsx"]);
+
+            tx.save_file(options, move |s: &mut App, result, _| match result {
+                Ok(Some(mut path)) => {
+                    if path.extension().is_none() {
+                        path.set_extension("xlsx");
+                    }
+                    match s.export_to(&path, &period) {
+                        Ok(count) => {
+                            s.notice = Some(format!(
+                                "Esportate {count} transazioni in {}",
+                                path.display()
+                            ));
+                        }
+                        Err(message) => {
+                            s.notice = Some(format!("Esportazione non riuscita: {message}"));
+                        }
+                    }
+                }
+                Ok(None) => {}
+                Err(err) => {
+                    s.notice = Some(format!(
+                        "Impossibile aprire la finestra di salvataggio: {err}"
+                    ));
+                }
+            });
+        })
+        .build(k);
+
+    let mut body = col()
+        .w_full()
+        .gap(12.0)
+        .child(
+            row()
+                .w_full()
+                .gap(12.0)
+                .items_start()
+                .child(field(k, "Da anno", from).grow(1.0))
+                .child(field(k, "A anno", to).grow(1.0)),
+        )
+        .child(field(k, "Mesi", months));
+    if let Some(err) = error_line(k, error) {
+        body = body.child(err);
+    }
+    body = body.child(buttons(cancel, confirm));
+
+    Dialog::new("export-dialog", "Esporta in Excel")
+        .description("Scegli il periodo e i mesi; lascia vuoti gli anni per tutta la cronologia.")
         .open(true)
         .width(560.0)
         .fit()

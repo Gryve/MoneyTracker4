@@ -4,6 +4,7 @@
 //! formatting; `state` owns what the views read; `ui` draws it.
 
 pub mod db;
+pub mod export;
 pub mod icons;
 pub mod model;
 pub mod state;

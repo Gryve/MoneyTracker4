@@ -21,6 +21,10 @@ fn on_key(s: &mut App, ev: &KeyEvent, _: &mut Tx) -> bool {
         s.open_add();
         return true;
     }
+    if ev.is_command('e') {
+        s.open_export();
+        return true;
+    }
     if ev.key == Key::Escape && s.dialog.is_some() {
         s.close_dialog();
         return true;

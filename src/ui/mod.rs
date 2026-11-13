@@ -38,6 +38,15 @@ pub fn root(s: &App, cx: &mut Cx<App>) -> El {
     let toolbar = Toolbar::new()
         .title("MoneyTracker")
         .trailing(
+            Button::new("Export Excel")
+                .variant(ButtonVariant::Neutral)
+                .control_size(ControlSize::Small)
+                .icon(&icons::DOWNLOAD)
+                .shortcut("Ctrl+E")
+                .on_press(|s: &mut App| s.open_export())
+                .build(k),
+        )
+        .trailing(
             Button::new("Add transaction")
                 .variant(ButtonVariant::Contrast)
                 .control_size(ControlSize::Small)
