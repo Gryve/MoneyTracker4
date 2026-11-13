@@ -2,13 +2,13 @@
 
 use rune::{canvas, col, el, icon, oklch, row, text, Color, El, Shape, TextStyle};
 use rune_kit::{
-    Button, ButtonVariant, ControlSize, IconButton, IconButtonVariant, Kit, Select,
-    SelectAppearance, TextInput,
+    scrim, Button, ButtonVariant, Checkbox, ControlSize, IconButton, IconButtonVariant, Kit,
+    Placement, Select, SelectAppearance, TextInput,
 };
 
 use crate::icons;
 use crate::model::{self, Kind, Transaction};
-use crate::state::{App, Picker};
+use crate::state::{App, Picker, TimeBucket};
 
 /// Amounts: semibold, tabular figures so the columns line up.
 pub fn amount_style(k: &Kit, size: f32) -> TextStyle {
@@ -443,6 +443,509 @@ pub fn month_picker(s: &App, k: &Kit, layer: &mut Vec<El>) -> El {
             .on_press(|s: &mut App| s.go_today())
             .build(k),
     )
+}
+
+/// The multi-select months and years pickers above the dashboard, with Today and All shortcuts.
+pub fn dashboard_picker(s: &App, k: &Kit, layer: &mut Vec<El>) -> El {
+    // ── Month multi-select trigger & popover ────────────────────────────────
+    let month_label = if s.dash_filter.is_all || s.dash_filter.all_months_selected() {
+        "Mesi: Tutti".to_owned()
+    } else {
+        let count = s.dash_filter.selected_months_count();
+        if count == 0 {
+            "Mesi: Nessuno".to_owned()
+        } else if count == 1 {
+            let m = (1..=12).find(|&m| s.dash_filter.month_selected(m)).unwrap_or(1);
+            format!("Mese: {}", model::month_only(m))
+        } else {
+            format!("Mesi: {count} sel.")
+        }
+    };
+
+    let month_open = s.picker_open == Some(Picker::DashMonths);
+    let chevron_m = if month_open { k.glyph.chevron_up } else { k.glyph.chevron_down };
+    let month_trigger = row()
+        .key("dash-month-trigger")
+        .h(28.0)
+        .px(10.0)
+        .gap(6.0)
+        .center_y()
+        .radius(k.radius.md)
+        .fill(if month_open { k.on(k.c.hover, k.c.bg_base) } else { k.c.bg_base })
+        .border(1.0, if month_open { k.c.border_focus } else { k.c.border_weak })
+        .hover(k.c.hover)
+        .on_press(|s: &mut App| s.toggle_picker(Picker::DashMonths))
+        .child(text(month_label).font(k.ty.ui_compact).color(k.c.text_base))
+        .child(icon(chevron_m, 14.0).color(k.c.icon_muted));
+
+    if month_open {
+        layer.push(scrim("dash-month-scrim", |s: &mut App| s.close_picker()));
+
+        let quick_actions = row()
+            .w_full()
+            .justify_between()
+            .child(
+                Button::new("Tutti")
+                    .variant(ButtonVariant::Ghost)
+                    .control_size(ControlSize::Small)
+                    .on_press(|s: &mut App| s.dash_select_all_months())
+                    .build(k),
+            )
+            .child(
+                Button::new("Nessuno")
+                    .variant(ButtonVariant::Ghost)
+                    .control_size(ControlSize::Small)
+                    .on_press(|s: &mut App| s.dash_deselect_all_months())
+                    .build(k),
+            );
+
+        let mut month_grid = col().w_full().gap(8.0);
+        let month_names = model::month_names();
+        for chunk in (1..=12).collect::<Vec<u32>>().chunks(3) {
+            let mut r = row().w_full().gap(12.0).center_y();
+            for &m in chunk {
+                let checked = s.dash_filter.month_selected(m);
+                let name = &month_names[m as usize - 1][..3];
+                r = r.child(
+                    Checkbox::new(checked)
+                        .label(name)
+                        .on_toggle(move |s: &mut App| s.toggle_dash_month(m))
+                        .build(k)
+                        .grow(1.0),
+                );
+            }
+            month_grid = month_grid.child(r);
+        }
+
+        let pop_content = col()
+            .key("dash-month-popover")
+            .w(260.0)
+            .padding(12.0)
+            .gap(10.0)
+            .child(quick_actions)
+            .child(month_grid);
+
+        let surface = rune_kit::popover::raised(k, pop_content, k.radius.md);
+        layer.push(rune_kit::popover::anchored(
+            k,
+            surface,
+            "dash-month-trigger",
+            Placement::BottomStart,
+            4.0,
+        ));
+    }
+
+    // ── Year multi-select trigger & popover ─────────────────────────────────
+    let year_options = s.year_options();
+    let year_label = if s.dash_filter.is_all || s.dash_filter.years.len() == year_options.len() {
+        "Anni: Tutti".to_owned()
+    } else if s.dash_filter.years.is_empty() {
+        "Anni: Nessuno".to_owned()
+    } else if s.dash_filter.years.len() == 1 {
+        format!("Anno: {}", s.dash_filter.years[0])
+    } else {
+        format!("Anni: {} sel.", s.dash_filter.years.len())
+    };
+
+    let year_open = s.picker_open == Some(Picker::DashYears);
+    let chevron_y = if year_open { k.glyph.chevron_up } else { k.glyph.chevron_down };
+    let year_trigger = row()
+        .key("dash-year-trigger")
+        .h(28.0)
+        .px(10.0)
+        .gap(6.0)
+        .center_y()
+        .radius(k.radius.md)
+        .fill(if year_open { k.on(k.c.hover, k.c.bg_base) } else { k.c.bg_base })
+        .border(1.0, if year_open { k.c.border_focus } else { k.c.border_weak })
+        .hover(k.c.hover)
+        .on_press(|s: &mut App| s.toggle_picker(Picker::DashYears))
+        .child(text(year_label).font(k.ty.ui_compact).color(k.c.text_base))
+        .child(icon(chevron_y, 14.0).color(k.c.icon_muted));
+
+    if year_open {
+        layer.push(scrim("dash-year-scrim", |s: &mut App| s.close_picker()));
+
+        let quick_actions = row()
+            .w_full()
+            .justify_between()
+            .child(
+                Button::new("Tutti")
+                    .variant(ButtonVariant::Ghost)
+                    .control_size(ControlSize::Small)
+                    .on_press(|s: &mut App| s.dash_select_all_years())
+                    .build(k),
+            )
+            .child(
+                Button::new("Nessuno")
+                    .variant(ButtonVariant::Ghost)
+                    .control_size(ControlSize::Small)
+                    .on_press(|s: &mut App| s.dash_deselect_all_years())
+                    .build(k),
+            );
+
+        let mut year_grid = col().w_full().gap(8.0);
+        for chunk in year_options.chunks(2) {
+            let mut r = row().w_full().gap(12.0).center_y();
+            for &y in chunk {
+                let checked = s.dash_filter.year_selected(y);
+                r = r.child(
+                    Checkbox::new(checked)
+                        .label(format!("{y}"))
+                        .on_toggle(move |s: &mut App| s.toggle_dash_year(y))
+                        .build(k)
+                        .grow(1.0),
+                );
+            }
+            if chunk.len() < 2 {
+                r = r.child(el().grow(1.0));
+            }
+            year_grid = year_grid.child(r);
+        }
+
+        let pop_content = col()
+            .key("dash-year-popover")
+            .w(200.0)
+            .padding(12.0)
+            .gap(10.0)
+            .child(quick_actions)
+            .child(year_grid);
+
+        let surface = rune_kit::popover::raised(k, pop_content, k.radius.md);
+        layer.push(rune_kit::popover::anchored(
+            k,
+            surface,
+            "dash-year-trigger",
+            Placement::BottomStart,
+            4.0,
+        ));
+    }
+
+    let today_btn = Button::new("Today")
+        .variant(ButtonVariant::Ghost)
+        .control_size(ControlSize::Small)
+        .on_press(|s: &mut App| s.dash_today())
+        .build(k);
+
+    let all_btn = Button::new("All")
+        .variant(if s.dash_filter.is_all {
+            ButtonVariant::Contrast
+        } else {
+            ButtonVariant::Ghost
+        })
+        .control_size(ControlSize::Small)
+        .on_press(|s: &mut App| s.dash_all())
+        .build(k);
+
+    row()
+        .gap(8.0)
+        .center_y()
+        .child(month_trigger)
+        .child(year_trigger)
+        .child(today_btn)
+        .child(all_btn)
+}
+
+fn nice_upper_bound(val: f64) -> f64 {
+    if val <= 0.0 {
+        return 100.0;
+    }
+    let magnitude = 10.0_f64.powf(val.log10().floor());
+    let normalized = val / magnitude;
+    let nice_norm = if normalized <= 1.0 {
+        1.0
+    } else if normalized <= 2.0 {
+        2.0
+    } else if normalized <= 2.5 {
+        2.5
+    } else if normalized <= 5.0 {
+        5.0
+    } else {
+        10.0
+    };
+    nice_norm * magnitude
+}
+
+/// A line chart panel with category selection checkboxes and multi-point time series.
+pub fn line_chart_panel(s: &App, k: &Kit, kind: Kind) -> El {
+    let title = match kind {
+        Kind::Expense => "Expense categories trend",
+        Kind::Income => "Income categories trend",
+    };
+    let icon_ptr = match kind {
+        Kind::Expense => &icons::ARROW_OUT,
+        Kind::Income => &icons::ARROW_IN,
+    };
+    let ink = kind_color(k, kind);
+
+    let (buckets, is_daily) = s.dash_filter.time_buckets(&s.dash_transactions);
+    let subtitle = if is_daily {
+        format!("Daily trend for {}", s.dash_filter_label())
+    } else {
+        format!("Monthly trend across {}", s.dash_filter_label())
+    };
+
+    // Collect all categories of this kind
+    let mut all_cats: Vec<String> = model::display_groups(s.categories.of(kind));
+    for t in &s.dash_transactions {
+        if t.kind == kind {
+            let d = model::display_name(&t.category);
+            if !all_cats.contains(&d) {
+                all_cats.push(d);
+            }
+        }
+    }
+
+    // Compute totals per category in filtered data
+    let mut cat_with_totals: Vec<(String, f64)> = all_cats
+        .into_iter()
+        .map(|cat| {
+            let total: f64 = s
+                .dash_transactions
+                .iter()
+                .filter(|t| t.kind == kind && model::display_name(&t.category) == cat)
+                .map(|t| t.amount)
+                .sum();
+            (cat, total)
+        })
+        .collect();
+
+    // Sort: categories with spend/income first (descending), then alphabetically
+    cat_with_totals.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+
+    let cat_data: Vec<(String, f64, Color)> = cat_with_totals
+        .into_iter()
+        .enumerate()
+        .map(|(i, (cat, total))| (cat, total, slice_color(k, i)))
+        .collect();
+
+    // Header actions: Tutti / Nessuno
+    let header_actions = row()
+        .gap(8.0)
+        .center_y()
+        .child(
+            Button::new("Tutti")
+                .variant(ButtonVariant::Ghost)
+                .control_size(ControlSize::Small)
+                .on_press(move |s: &mut App| s.dash_select_all_categories(kind))
+                .build(k),
+        )
+        .child(
+            Button::new("Nessuno")
+                .variant(ButtonVariant::Ghost)
+                .control_size(ControlSize::Small)
+                .on_press(move |s: &mut App| s.dash_deselect_all_categories(kind))
+                .build(k),
+        );
+
+    let head = row()
+        .w_full()
+        .gap(12.0)
+        .center_y()
+        .justify_between()
+        .child(
+            row()
+                .gap(10.0)
+                .center_y()
+                .child(icon_chip(k, icon_ptr, ink, 28.0))
+                .child(
+                    col()
+                        .gap(2.0)
+                        .child(text(title.to_owned()).font(k.ty.ui_medium).color(k.c.text_base))
+                        .child(text(subtitle).font(k.ty.caption()).color(k.c.text_faint)),
+                ),
+        )
+        .child(header_actions);
+
+    // Category checkboxes grid: chunks of 4
+    let mut category_grid = col().w_full().gap(8.0);
+    const CHUNK: usize = 4;
+    for chunk in cat_data.chunks(CHUNK) {
+        let mut line = row().w_full().gap(12.0).center_y();
+        for (cat_name, cat_total, color) in chunk {
+            let is_visible = s.dash_filter.is_category_visible(kind, cat_name);
+            let total_str = if *cat_total > 0.0 {
+                format!(" ({})", model::euros(*cat_total))
+            } else {
+                String::new()
+            };
+            let label = format!("{cat_name}{total_str}");
+            let key = cat_name.clone();
+            line = line.child(
+                row()
+                    .gap(6.0)
+                    .center_y()
+                    .child(row().size(8.0, 8.0).radius(4.0).fill(if is_visible {
+                        *color
+                    } else {
+                        k.c.text_faint
+                    }))
+                    .child(
+                        Checkbox::new(is_visible)
+                            .label(label)
+                            .on_toggle(move |s: &mut App| s.toggle_dash_category(kind, &key))
+                            .build(k),
+                    )
+                    .grow(1.0),
+            );
+        }
+        for _ in chunk.len()..CHUNK {
+            line = line.child(el().grow(1.0));
+        }
+        category_grid = category_grid.child(line);
+    }
+
+    // Build series data for visible categories
+    let mut visible_series: Vec<(String, Color, Vec<f64>)> = Vec::new();
+    for (cat_name, _, color) in &cat_data {
+        if !s.dash_filter.is_category_visible(kind, cat_name) {
+            continue;
+        }
+        let mut vals = Vec::with_capacity(buckets.len());
+        for b in &buckets {
+            let val: f64 = match b {
+                TimeBucket::Day(date) => {
+                    let d_str = date.format("%Y-%m-%d").to_string();
+                    s.dash_transactions
+                        .iter()
+                        .filter(|t| t.kind == kind && t.date == d_str && model::display_name(&t.category) == *cat_name)
+                        .map(|t| t.amount)
+                        .sum()
+                }
+                TimeBucket::Month(y, m) => {
+                    let prefix = format!("{y:04}-{m:02}");
+                    s.dash_transactions
+                        .iter()
+                        .filter(|t| t.kind == kind && t.date.starts_with(&prefix) && model::display_name(&t.category) == *cat_name)
+                        .map(|t| t.amount)
+                        .sum()
+                }
+            };
+            vals.push(val);
+        }
+        visible_series.push((cat_name.clone(), *color, vals));
+    }
+
+    let chart_content = if buckets.is_empty() {
+        empty_state(
+            k,
+            &icons::SCALE,
+            "Nessun dato per il periodo selezionato",
+            "Modifica il filtro di mesi o anni per visualizzare i dati",
+        )
+    } else if visible_series.is_empty() {
+        empty_state(
+            k,
+            &icons::ALERT,
+            "Nessuna categoria selezionata",
+            "Seleziona almeno una categoria per visualizzare l'andamento",
+        )
+    } else {
+        let max_val: f64 = visible_series
+            .iter()
+            .flat_map(|(_, _, vals)| vals.iter().copied())
+            .fold(0.0, f64::max);
+        let display_max = nice_upper_bound(max_val);
+
+        const VIEW_W: f32 = 1000.0;
+        const VIEW_H: f32 = 180.0;
+        let pad_x = 24.0;
+        let pad_top = 16.0;
+        let pad_bot = 16.0;
+        let plot_w = VIEW_W - 2.0 * pad_x;
+        let plot_h = VIEW_H - pad_top - pad_bot;
+
+        let mut shape = Shape::new();
+        // 5 horizontal grid lines
+        for step in 0..=4 {
+            let ratio = step as f32 / 4.0;
+            let y = pad_top + (1.0 - ratio) * plot_h;
+            let line_color = if step == 0 {
+                k.c.border_muted
+            } else {
+                k.c.border_muted.alpha(0.35)
+            };
+            shape = shape.line([pad_x, y], [pad_x + plot_w, y], 1.0, rune::LineCap::Round, line_color);
+        }
+
+        let n_buckets = buckets.len();
+        for (_, color, vals) in &visible_series {
+            let points: Vec<[f32; 2]> = vals
+                .iter()
+                .enumerate()
+                .map(|(idx, &v)| {
+                    let x = if n_buckets > 1 {
+                        pad_x + (idx as f32 / (n_buckets - 1) as f32) * plot_w
+                    } else {
+                        pad_x + plot_w / 2.0
+                    };
+                    let ratio = (v / display_max).clamp(0.0, 1.0) as f32;
+                    let y = pad_top + (1.0 - ratio) * plot_h;
+                    [x, y]
+                })
+                .collect();
+
+            if n_buckets > 1 {
+                shape = shape.stroke(points.clone(), 2.5, *color);
+            }
+            for p in &points {
+                shape = shape.line([p[0] - 0.5, p[1]], [p[0] + 0.5, p[1]], 6.0, rune::LineCap::Round, *color);
+                shape = shape.line([p[0] - 0.2, p[1]], [p[0] + 0.2, p[1]], 2.5, rune::LineCap::Round, k.c.layer_01);
+            }
+        }
+        shape = shape.view_box(VIEW_W, VIEW_H);
+
+        // Y-axis labels column
+        let y_labels = col()
+            .w(75.0)
+            .h(180.0)
+            .justify_between()
+            .items_end()
+            .pr(10.0)
+            .child(text(model::euros(display_max)).font(k.ty.caption()).color(k.c.text_faint))
+            .child(text(model::euros(display_max * 0.75)).font(k.ty.caption()).color(k.c.text_faint))
+            .child(text(model::euros(display_max * 0.50)).font(k.ty.caption()).color(k.c.text_faint))
+            .child(text(model::euros(display_max * 0.25)).font(k.ty.caption()).color(k.c.text_faint))
+            .child(text(model::euros(0.0)).font(k.ty.caption()).color(k.c.text_faint));
+
+        // X-axis labels row
+        let mut x_labels_row = row().w_full().justify_between().px(16.0);
+        let sample_step = if n_buckets > 14 {
+            (n_buckets / 8).max(1)
+        } else {
+            1
+        };
+
+        for (idx, b) in buckets.iter().enumerate() {
+            if sample_step == 1 || idx % sample_step == 0 || idx == n_buckets - 1 {
+                x_labels_row = x_labels_row.child(
+                    text(b.label())
+                        .font(k.ty.caption())
+                        .color(k.c.text_faint),
+                );
+            }
+        }
+
+        row()
+            .w_full()
+            .gap(4.0)
+            .child(y_labels)
+            .child(
+                col()
+                    .grow(1.0)
+                    .gap(4.0)
+                    .child(canvas(shape).w_full().h(180.0))
+                    .child(x_labels_row),
+            )
+    };
+
+    panel(k)
+        .w_full()
+        .padding(16.0)
+        .gap(14.0)
+        .child(head)
+        .child(category_grid)
+        .child(chart_content)
 }
 
 /// The year picker for the budgets and year overview.

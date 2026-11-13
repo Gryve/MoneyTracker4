@@ -69,6 +69,8 @@ impl View {
 pub enum Picker {
     Month,
     Year,
+    DashMonths,
+    DashYears,
 }
 
 /// Which modal is open. The form fields live on [`App`] so handlers can borrow them directly.
@@ -180,6 +182,166 @@ impl CatsForm {
     }
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub enum TimeBucket {
+    Day(NaiveDate),
+    Month(i32, u32),
+}
+
+impl TimeBucket {
+    pub fn label(&self) -> String {
+        match self {
+            TimeBucket::Day(d) => format!("{:02}", d.day()),
+            TimeBucket::Month(y, m) => {
+                let name = model::month_only(*m);
+                let short_name = if name.len() >= 3 { &name[..3] } else { name };
+                format!("{} '{:02}", short_name, y % 100)
+            }
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct DashboardFilter {
+    pub is_all: bool,
+    pub years: Vec<i32>,
+    pub months: [bool; 12],
+    pub visible_expense_categories: HashMap<String, bool>,
+    pub visible_income_categories: HashMap<String, bool>,
+}
+
+impl DashboardFilter {
+    pub fn new(current_year: i32, current_month: u32) -> Self {
+        let mut months = [false; 12];
+        if (1..=12).contains(&current_month) {
+            months[current_month as usize - 1] = true;
+        }
+        Self {
+            is_all: false,
+            years: vec![current_year],
+            months,
+            visible_expense_categories: HashMap::new(),
+            visible_income_categories: HashMap::new(),
+        }
+    }
+
+    pub fn month_selected(&self, month: u32) -> bool {
+        if self.is_all {
+            return true;
+        }
+        self.months[month.clamp(1, 12) as usize - 1]
+    }
+
+    pub fn year_selected(&self, year: i32) -> bool {
+        if self.is_all {
+            return true;
+        }
+        self.years.contains(&year)
+    }
+
+    pub fn selected_months_count(&self) -> usize {
+        if self.is_all {
+            12
+        } else {
+            self.months.iter().filter(|&&m| m).count()
+        }
+    }
+
+    pub fn all_months_selected(&self) -> bool {
+        self.months.iter().all(|&m| m)
+    }
+
+    pub fn no_months_selected(&self) -> bool {
+        self.months.iter().all(|&m| !m)
+    }
+
+    pub fn is_category_visible(&self, kind: Kind, category: &str) -> bool {
+        let map = match kind {
+            Kind::Expense => &self.visible_expense_categories,
+            Kind::Income => &self.visible_income_categories,
+        };
+        map.get(category).copied().unwrap_or(true)
+    }
+
+    pub fn toggle_category(&mut self, kind: Kind, category: &str) {
+        let map = match kind {
+            Kind::Expense => &mut self.visible_expense_categories,
+            Kind::Income => &mut self.visible_income_categories,
+        };
+        let current = map.get(category).copied().unwrap_or(true);
+        map.insert(category.to_string(), !current);
+    }
+
+    pub fn set_all_categories(&mut self, kind: Kind, categories: &[String], visible: bool) {
+        let map = match kind {
+            Kind::Expense => &mut self.visible_expense_categories,
+            Kind::Income => &mut self.visible_income_categories,
+        };
+        for cat in categories {
+            map.insert(cat.clone(), visible);
+        }
+    }
+
+    pub fn matches(&self, t: &Transaction) -> bool {
+        if self.is_all {
+            return true;
+        }
+        let parts: Vec<&str> = t.date.split('-').collect();
+        if parts.len() < 2 {
+            return false;
+        }
+        let Ok(year) = parts[0].parse::<i32>() else { return false };
+        let Ok(month) = parts[1].parse::<u32>() else { return false };
+        if !self.years.contains(&year) {
+            return false;
+        }
+        if !self.month_selected(month) {
+            return false;
+        }
+        true
+    }
+
+    pub fn time_buckets(&self, transactions: &[Transaction]) -> (Vec<TimeBucket>, bool) {
+        if !self.is_all && self.years.len() == 1 && self.selected_months_count() == 1 {
+            let year = self.years[0];
+            let month = (1..=12).find(|&m| self.month_selected(m)).unwrap_or(1);
+            let days = db::month_days(year, month);
+            let buckets = days.into_iter().map(TimeBucket::Day).collect();
+            (buckets, true)
+        } else {
+            let mut pairs = Vec::new();
+            if self.is_all {
+                for t in transactions {
+                    let parts: Vec<&str> = t.date.split('-').collect();
+                    if parts.len() >= 2 {
+                        if let (Ok(y), Ok(m)) = (parts[0].parse::<i32>(), parts[1].parse::<u32>()) {
+                            pairs.push((y, m));
+                        }
+                    }
+                }
+                pairs.sort_unstable();
+                pairs.dedup();
+                if pairs.is_empty() {
+                    let today = Local::now().date_naive();
+                    pairs.push((today.year(), today.month()));
+                }
+            } else {
+                let mut sorted_years = self.years.clone();
+                sorted_years.sort_unstable();
+                for &y in &sorted_years {
+                    for m in 1..=12 {
+                        if self.month_selected(m) {
+                            pairs.push((y, m));
+                        }
+                    }
+                }
+            }
+            let buckets = pairs.into_iter().map(|(y, m)| TimeBucket::Month(y, m)).collect();
+            (buckets, false)
+        }
+    }
+}
+
 pub struct App {
     pub db: Db,
     pub view: View,
@@ -205,6 +367,10 @@ pub struct App {
     pub all_time: Balance,
     pub transactions: Vec<Transaction>,
     pub day_transactions: Vec<Transaction>,
+    pub all_transactions: Vec<Transaction>,
+    pub dash_filter: DashboardFilter,
+    pub dash_transactions: Vec<Transaction>,
+    pub dash_summary: MonthlySummary,
 
     // Currency, editable per year
     pub budget_edits: HashMap<String, TextEdit>,
@@ -248,6 +414,7 @@ impl App {
     }
 
     fn open(db: Db, month: NaiveDate, selected_day: NaiveDate) -> App {
+        let dash_filter = DashboardFilter::new(month.year(), month.month());
         let mut app = App {
             view: App::initial_view(),
             db,
@@ -266,6 +433,10 @@ impl App {
             all_time: Balance::default(),
             transactions: Vec::new(),
             day_transactions: Vec::new(),
+            all_transactions: Vec::new(),
+            dash_filter,
+            dash_transactions: Vec::new(),
+            dash_summary: MonthlySummary::default(),
             budget_edits: HashMap::new(),
             budget_focus: None,
             dialog: None,
@@ -395,7 +566,168 @@ impl App {
                 })
             });
         }
+        self.all_transactions = self.db.load_transactions()?;
+        self.update_dashboard_data();
         Ok(())
+    }
+
+    pub fn update_dashboard_data(&mut self) {
+        self.dash_transactions = self
+            .all_transactions
+            .iter()
+            .filter(|t| self.dash_filter.matches(t))
+            .cloned()
+            .collect();
+        self.dash_summary = App::summarize_transactions(&self.dash_transactions);
+    }
+
+    pub fn summarize_transactions(transactions: &[Transaction]) -> MonthlySummary {
+        let mut summary = MonthlySummary {
+            transaction_count: transactions.len(),
+            ..Default::default()
+        };
+        for t in transactions {
+            match t.kind {
+                Kind::Income => summary.total_income += t.amount,
+                Kind::Expense => summary.total_expense += t.amount,
+            }
+            let day = summary.daily.entry(t.date.clone()).or_insert((0.0, 0.0));
+            match t.kind {
+                Kind::Income => day.0 += t.amount,
+                Kind::Expense => day.1 += t.amount,
+            }
+            match t.kind {
+                Kind::Expense => {
+                    *summary
+                        .category_expenses
+                        .entry(t.category.clone())
+                        .or_insert(0.0) += t.amount
+                }
+                Kind::Income => {
+                    *summary
+                        .category_income
+                        .entry(t.category.clone())
+                        .or_insert(0.0) += t.amount
+                }
+            }
+        }
+        summary.total_income = db::round2(summary.total_income);
+        summary.total_expense = db::round2(summary.total_expense);
+        summary.balance = db::round2(summary.total_income - summary.total_expense);
+        summary
+    }
+
+    pub fn dash_filter_label(&self) -> String {
+        if self.dash_filter.is_all {
+            return "All time".to_owned();
+        }
+        let years = &self.dash_filter.years;
+        let months_count = self.dash_filter.selected_months_count();
+        if years.is_empty() || months_count == 0 {
+            return "No period selected".to_owned();
+        }
+        if years.len() == 1 {
+            let year = years[0];
+            if months_count == 1 {
+                let m = (1..=12).find(|&m| self.dash_filter.month_selected(m)).unwrap_or(1);
+                return model::month_name(year, m);
+            } else if months_count == 12 {
+                return format!("Year {year}");
+            } else {
+                return format!("{months_count} months · {year}");
+            }
+        } else {
+            let mut sorted_years = years.clone();
+            sorted_years.sort_unstable();
+            let years_str = sorted_years.iter().map(|y| y.to_string()).collect::<Vec<_>>().join(", ");
+            if months_count == 12 {
+                return format!("Years {years_str}");
+            } else if months_count == 1 {
+                let m = (1..=12).find(|&m| self.dash_filter.month_selected(m)).unwrap_or(1);
+                let m_name = model::month_only(m);
+                return format!("{m_name} · {years_str}");
+            } else {
+                return format!("{months_count} months · {years_str}");
+            }
+        }
+    }
+
+    pub fn dash_today(&mut self) {
+        self.picker_open = None;
+        let today = today_iso_date();
+        self.month = today.with_day(1).unwrap_or(today);
+        self.selected_day = Some(today);
+        self.year = today.year();
+        self.dash_filter.is_all = false;
+        self.dash_filter.years = vec![today.year()];
+        self.dash_filter.months = [false; 12];
+        if (1..=12).contains(&today.month()) {
+            self.dash_filter.months[today.month() as usize - 1] = true;
+        }
+        self.reload();
+    }
+
+    pub fn dash_all(&mut self) {
+        self.picker_open = None;
+        self.dash_filter.is_all = true;
+        self.dash_filter.years = self.year_options();
+        self.dash_filter.months = [true; 12];
+        self.update_dashboard_data();
+    }
+
+    pub fn toggle_dash_month(&mut self, month: u32) {
+        self.dash_filter.is_all = false;
+        let idx = month.clamp(1, 12) as usize - 1;
+        self.dash_filter.months[idx] = !self.dash_filter.months[idx];
+        self.update_dashboard_data();
+    }
+
+    pub fn dash_select_all_months(&mut self) {
+        self.dash_filter.is_all = false;
+        self.dash_filter.months = [true; 12];
+        self.update_dashboard_data();
+    }
+
+    pub fn dash_deselect_all_months(&mut self) {
+        self.dash_filter.is_all = false;
+        self.dash_filter.months = [false; 12];
+        self.update_dashboard_data();
+    }
+
+    pub fn toggle_dash_year(&mut self, year: i32) {
+        self.dash_filter.is_all = false;
+        if let Some(pos) = self.dash_filter.years.iter().position(|&y| y == year) {
+            self.dash_filter.years.remove(pos);
+        } else {
+            self.dash_filter.years.push(year);
+        }
+        self.update_dashboard_data();
+    }
+
+    pub fn dash_select_all_years(&mut self) {
+        self.dash_filter.is_all = false;
+        self.dash_filter.years = self.year_options();
+        self.update_dashboard_data();
+    }
+
+    pub fn dash_deselect_all_years(&mut self) {
+        self.dash_filter.is_all = false;
+        self.dash_filter.years.clear();
+        self.update_dashboard_data();
+    }
+
+    pub fn toggle_dash_category(&mut self, kind: Kind, category: &str) {
+        self.dash_filter.toggle_category(kind, category);
+    }
+
+    pub fn dash_select_all_categories(&mut self, kind: Kind) {
+        let cats: Vec<String> = model::display_groups(self.categories.of(kind));
+        self.dash_filter.set_all_categories(kind, &cats, true);
+    }
+
+    pub fn dash_deselect_all_categories(&mut self, kind: Kind) {
+        let cats: Vec<String> = model::display_groups(self.categories.of(kind));
+        self.dash_filter.set_all_categories(kind, &cats, false);
     }
 
     // ── Navigation ──────────────────────────────────────────────────────────
@@ -819,4 +1151,122 @@ pub fn today_iso_date() -> NaiveDate {
 
 pub fn today_iso() -> String {
     today_iso_date().format("%Y-%m-%d").to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dashboard_filter_defaults_to_single_month() {
+        let filter = DashboardFilter::new(2026, 11);
+        assert!(!filter.is_all);
+        assert_eq!(filter.years, vec![2026]);
+        assert_eq!(filter.selected_months_count(), 1);
+        assert!(filter.month_selected(11));
+        assert!(!filter.month_selected(10));
+
+        let t_nov = Transaction {
+            id: "1".into(),
+            kind: Kind::Expense,
+            amount: 50.0,
+            category: "Food".into(),
+            description: "".into(),
+            date: "2026-11-15".into(),
+            created_at: "".into(),
+        };
+        let t_oct = Transaction {
+            id: "2".into(),
+            kind: Kind::Expense,
+            amount: 30.0,
+            category: "Food".into(),
+            description: "".into(),
+            date: "2026-10-15".into(),
+            created_at: "".into(),
+        };
+        assert!(filter.matches(&t_nov));
+        assert!(!filter.matches(&t_oct));
+    }
+
+    #[test]
+    fn dashboard_filter_multi_selection() {
+        let mut filter = DashboardFilter::new(2026, 11);
+        filter.months[9] = true; // October (index 9)
+        filter.years.push(2025);
+
+        assert_eq!(filter.selected_months_count(), 2);
+        assert!(filter.year_selected(2025));
+        assert!(filter.year_selected(2026));
+
+        let t1 = Transaction {
+            id: "1".into(),
+            kind: Kind::Expense,
+            amount: 10.0,
+            category: "Food".into(),
+            description: "".into(),
+            date: "2025-10-01".into(),
+            created_at: "".into(),
+        };
+        let t2 = Transaction {
+            id: "2".into(),
+            kind: Kind::Expense,
+            amount: 20.0,
+            category: "Food".into(),
+            description: "".into(),
+            date: "2026-11-20".into(),
+            created_at: "".into(),
+        };
+        let t3 = Transaction {
+            id: "3".into(),
+            kind: Kind::Expense,
+            amount: 30.0,
+            category: "Food".into(),
+            description: "".into(),
+            date: "2024-10-01".into(),
+            created_at: "".into(),
+        };
+        assert!(filter.matches(&t1));
+        assert!(filter.matches(&t2));
+        assert!(!filter.matches(&t3));
+    }
+
+    #[test]
+    fn dashboard_filter_all_matches_everything() {
+        let mut filter = DashboardFilter::new(2026, 11);
+        filter.is_all = true;
+        let t_old = Transaction {
+            id: "1".into(),
+            kind: Kind::Income,
+            amount: 1000.0,
+            category: "Salary".into(),
+            description: "".into(),
+            date: "2020-01-01".into(),
+            created_at: "".into(),
+        };
+        assert!(filter.matches(&t_old));
+    }
+
+    #[test]
+    fn dashboard_filter_category_visibility() {
+        let mut filter = DashboardFilter::new(2026, 11);
+        assert!(filter.is_category_visible(Kind::Expense, "Food & Dining"));
+        filter.toggle_category(Kind::Expense, "Food & Dining");
+        assert!(!filter.is_category_visible(Kind::Expense, "Food & Dining"));
+        filter.toggle_category(Kind::Expense, "Food & Dining");
+        assert!(filter.is_category_visible(Kind::Expense, "Food & Dining"));
+    }
+
+    #[test]
+    fn dashboard_time_buckets_daily_and_monthly() {
+        let filter_single = DashboardFilter::new(2026, 11);
+        let (buckets_day, is_daily) = filter_single.time_buckets(&[]);
+        assert!(is_daily);
+        assert_eq!(buckets_day.len(), 30); // November has 30 days
+
+        let mut filter_multi = DashboardFilter::new(2026, 11);
+        filter_multi.months[9] = true; // October
+        let (buckets_month, is_daily_m) = filter_multi.time_buckets(&[]);
+        assert!(!is_daily_m);
+        assert_eq!(buckets_month.len(), 2);
+    }
 }
